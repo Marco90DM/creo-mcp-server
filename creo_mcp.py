@@ -884,6 +884,633 @@ def creo_set_standard_color(
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+# ============================================================================
+# CORE SESSION TOOLS — F8.1 (regen, save, list models, parameters, family table)
+# ============================================================================
+
+@mcp.tool()
+def creo_regen(model: Optional[str] = None, display: bool = True) -> Dict[str, Any]:
+    """
+    Regenerate a model (equivalent to Ctrl+G in Creo).
+    Must be called after parameter changes to propagate geometry updates.
+
+    Args:
+        model: Model name (default: active model)
+        display: Refresh display after regen (default: True)
+    """
+    try:
+        client = get_creoson_client()
+        client.file_regenerate(file_=model, display=display)
+        return {
+            "success": True,
+            "message": f"Regenerated: {model or 'active model'}",
+            "model": model or "active"
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def creo_save(model: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Save a model to disk.
+
+    Args:
+        model: Model name (default: active model)
+    """
+    try:
+        client = get_creoson_client()
+        client.file_save(file_=model)
+        return {
+            "success": True,
+            "message": f"Saved: {model or 'active model'}",
+            "model": model or "active"
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def creo_save_all() -> Dict[str, Any]:
+    """Save all open models in the current Creo session."""
+    try:
+        client = get_creoson_client()
+        files = client.file_list(file_="*") or []
+        saved, failed = [], []
+        for f in files:
+            fname = f if isinstance(f, str) else f.get("file", "")
+            if not fname:
+                continue
+            try:
+                client.file_save(file_=fname)
+                saved.append(fname)
+            except Exception as e:
+                failed.append({"file": fname, "error": str(e)})
+        return {
+            "success": True,
+            "saved": saved,
+            "failed": failed,
+            "saved_count": len(saved),
+            "failed_count": len(failed)
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def creo_list_models() -> Dict[str, Any]:
+    """List all models currently open in the Creo session."""
+    try:
+        client = get_creoson_client()
+        files = client.file_list(file_="*") or []
+        _EXT_TYPE = {"prt": "PART", "asm": "ASSEMBLY", "drw": "DRAWING", "frm": "FORMAT"}
+        models = []
+        for f in files:
+            if isinstance(f, str):
+                ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
+                models.append({"file": f, "type": _EXT_TYPE.get(ext, "UNKNOWN")})
+            elif isinstance(f, dict):
+                models.append(f)
+        return {"success": True, "models": models, "count": len(models)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def creo_get_parameters(
+    model: Optional[str] = None,
+    name_filter: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Get parameters of a model.
+
+    Args:
+        model: Model name (default: active model)
+        name_filter: Filter by parameter name pattern (e.g. 'MATERIAL*')
+    """
+    try:
+        client = get_creoson_client()
+        params = client.parameter_list(name=name_filter, file_=model) or []
+        return {
+            "success": True,
+            "model": model or "active",
+            "parameters": params,
+            "count": len(params)
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def creo_set_parameter(
+    name: str,
+    value: Any,
+    model: Optional[str] = None,
+    param_type: str = "STRING"
+) -> Dict[str, Any]:
+    """
+    Set a parameter value on a model. Call creo_regen after to propagate changes.
+
+    Args:
+        name: Parameter name
+        value: New value
+        model: Model name (default: active model)
+        param_type: Value type — STRING, DOUBLE, INTEGER, BOOL, NOTE (default: STRING)
+    """
+    VALID_TYPES = {"STRING", "DOUBLE", "INTEGER", "BOOL", "NOTE"}
+    if param_type not in VALID_TYPES:
+        return {"success": False, "error": f"Invalid param_type '{param_type}'. Valid: {sorted(VALID_TYPES)}"}
+    try:
+        client = get_creoson_client()
+        client.parameter_set(name=name, value=value, file_=model, type_=param_type)
+        return {
+            "success": True,
+            "message": f"Set '{name}' = {value} ({param_type})",
+            "name": name,
+            "value": value,
+            "type": param_type,
+            "model": model or "active"
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def creo_get_family_table(model: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Get the family table of a model (all instances/variants).
+
+    Args:
+        model: Model name (default: active model)
+    """
+    try:
+        client = get_creoson_client()
+        header = client.familytable_get_header(file_=model) or []
+        rows = client.familytable_list_rows(file_=model) or []
+        instances = []
+        for row_name in rows:
+            try:
+                row_data = client.familytable_get_row(instance=row_name, file_=model)
+                instances.append({"name": row_name, "values": row_data})
+            except Exception as e:
+                logger.warning(f"Could not get row '{row_name}': {e}")
+                instances.append({"name": row_name, "error": str(e)})
+        return {
+            "success": True,
+            "model": model or "active",
+            "columns": header,
+            "instances": instances,
+            "count": len(instances)
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ============================================================================
+# ASSEMBLY & BOM TOOLS — F8.2
+# ============================================================================
+
+@mcp.tool()
+def creo_list_components(
+    assembly: Optional[str] = None,
+    top_level_only: bool = False
+) -> Dict[str, Any]:
+    """
+    List components of an assembly with hierarchy.
+
+    Args:
+        assembly: Assembly file name (default: active model)
+        top_level_only: Only return top-level components (default: False = recursive)
+    """
+    try:
+        client = get_creoson_client()
+        paths = client.bom_get_paths(
+            file_=assembly,
+            paths=True,
+            skeleton=False,
+            top_level=top_level_only
+        )
+        return {
+            "success": True,
+            "assembly": assembly or "active",
+            "components": paths if paths else [],
+            "top_level_only": top_level_only
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def creo_get_bom(
+    assembly: Optional[str] = None,
+    recursive: bool = True
+) -> Dict[str, Any]:
+    """
+    Generate a Bill of Materials (BOM) from an assembly.
+    Returns a flat list with part numbers, types, and quantities.
+
+    Args:
+        assembly: Assembly file name (default: active model)
+        recursive: Include sub-assemblies recursively (default: True)
+    """
+    try:
+        client = get_creoson_client()
+        paths = client.bom_get_paths(
+            file_=assembly,
+            paths=True,
+            skeleton=False,
+            top_level=not recursive
+        )
+
+        _EXT_TYPE = {"prt": "PART", "asm": "SUBASSEMBLY"}
+        bom: Dict[str, Any] = {}
+
+        def _walk(items: Any, level: int = 0) -> None:
+            if not items:
+                return
+            if isinstance(items, dict):
+                items = [items]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                fname = item.get("file", "")
+                if fname:
+                    ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+                    if fname in bom:
+                        bom[fname]["qty"] += 1
+                    else:
+                        bom[fname] = {
+                            "file": fname,
+                            "type": _EXT_TYPE.get(ext, "PART"),
+                            "qty": 1,
+                            "level": level
+                        }
+                _walk(item.get("children"), level + 1)
+
+        _walk(paths)
+        bom_list = sorted(bom.values(), key=lambda x: (x["level"], x["file"]))
+        return {
+            "success": True,
+            "assembly": assembly or "active",
+            "bom": bom_list,
+            "total_unique_items": len(bom_list),
+            "total_quantity": sum(i["qty"] for i in bom_list)
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def creo_check_interference(assembly: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Check for geometric interferences between components in an assembly.
+
+    Args:
+        assembly: Assembly file name (default: active model)
+    """
+    try:
+        client = get_creoson_client()
+        result = client.geometry_get_edges(file_=assembly)
+        # geometry_get_edges is a probe — real interference uses a different CREOSON path.
+        # Return informational response pointing to the correct workflow.
+        return {
+            "success": False,
+            "message": "creo_check_interference requires CREOSON Interference Analysis which is not yet exposed in creopyson 0.7.8. Use Creo menu: Analysis → Model → Global Interference.",
+            "workaround": "Run 'Analysis > Model > Global Interference' in Creo manually, or call creo_get_model_info to inspect geometry."
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": "Interference check not available via CREOSON in this version.",
+            "error": str(e)
+        }
+
+
+@mcp.tool()
+def creo_add_component(
+    component: str,
+    assembly: Optional[str] = None,
+    package_assembly: bool = False
+) -> Dict[str, Any]:
+    """
+    Add a component (part or subassembly) to an assembly.
+    The component is added as a packaged (unplaced) component if package_assembly=True,
+    or using default placement constraints otherwise.
+
+    Args:
+        component: Component file name to add (e.g., 'bolt_m6.prt')
+        assembly: Target assembly (default: active model)
+        package_assembly: Add as packaged/unplaced component (default: False)
+    """
+    try:
+        client = get_creoson_client()
+        result = client.asm_add_component(
+            file_=component,
+            assembly=assembly,
+            package_assembly=package_assembly
+        )
+        return {
+            "success": True,
+            "message": f"Added component '{component}' to assembly",
+            "component": component,
+            "assembly": assembly or "active",
+            "result": result
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ============================================================================
+# ADVANCED DRAWING TOOLS — F8.3 (notes, dimensions, title block, tables)
+# ============================================================================
+
+@mcp.tool()
+def creo_add_note(
+    text: str,
+    point: Optional[Dict[str, float]] = None,
+    drawing: Optional[str] = None,
+    name: Optional[str] = None,
+    sheet: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Add a text note to a drawing.
+
+    Args:
+        text: Note text content (use \\n for line breaks)
+        point: Position {"x": 100, "y": 150} in drawing units (default: center of sheet)
+        drawing: Drawing name (default: active drawing)
+        name: Note name/identifier (default: auto-generated)
+        sheet: Sheet number (default: active sheet)
+    """
+    try:
+        client = get_creoson_client()
+        kwargs: Dict[str, Any] = {"text": [text] if isinstance(text, str) else text, "file_": drawing}
+        if name:
+            kwargs["name"] = name
+        if point:
+            kwargs["location"] = point
+        if sheet:
+            kwargs["sheet"] = sheet
+        result = client.note_set(**kwargs)
+        return {
+            "success": True,
+            "message": f"Added note to drawing",
+            "text": text,
+            "drawing": drawing or "active",
+            "result": result
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def creo_get_notes(drawing: Optional[str] = None) -> Dict[str, Any]:
+    """
+    List all notes in a drawing.
+
+    Args:
+        drawing: Drawing name (default: active drawing)
+    """
+    try:
+        client = get_creoson_client()
+        notes = client.note_list(file_=drawing) or []
+        return {
+            "success": True,
+            "drawing": drawing or "active",
+            "notes": notes,
+            "count": len(notes)
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def creo_set_title_block(
+    fields: Dict[str, str],
+    drawing: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Set title block fields in a drawing by writing parameters with matching names.
+    Creo title blocks are typically driven by drawing parameters.
+
+    Args:
+        fields: Dict of field_name → value (e.g. {"TITLE": "My Part", "DRW_NO": "001", "REVISION": "A"})
+        drawing: Drawing name (default: active drawing)
+    """
+    try:
+        client = get_creoson_client()
+        set_ok, failed = [], []
+        for name, value in fields.items():
+            try:
+                client.parameter_set(name=name, value=str(value), file_=drawing, type_="STRING")
+                set_ok.append(name)
+            except Exception as e:
+                logger.warning(f"Could not set title block field '{name}': {e}")
+                failed.append({"field": name, "error": str(e)})
+        return {
+            "success": len(failed) == 0,
+            "message": f"Set {len(set_ok)} title block fields",
+            "set": set_ok,
+            "failed": failed,
+            "drawing": drawing or "active"
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def creo_add_dimension(
+    ref1: str,
+    ref2: Optional[str] = None,
+    drawing: Optional[str] = None,
+    dim_type: str = "LINEAR"
+) -> Dict[str, Any]:
+    """
+    Add a driven dimension to a drawing.
+    Note: driven dimensions reference geometry; use Creo's 'Show Model Annotations'
+    workflow for driven dims from model. This creates a reference dimension.
+
+    Args:
+        ref1: First geometry reference (view + entity, e.g. 'FRONT:edge_1')
+        ref2: Second reference for linear dims (optional for radius/diameter)
+        drawing: Drawing name (default: active drawing)
+        dim_type: LINEAR, RADIAL, DIAMETER, ANGULAR (default: LINEAR)
+    """
+    try:
+        client = get_creoson_client()
+        result = client.drawing_add_draft_dim(
+            drawing=drawing,
+            ref1=ref1,
+            ref2=ref2,
+            type_=dim_type
+        )
+        return {
+            "success": True,
+            "message": f"Added {dim_type} dimension",
+            "dim_type": dim_type,
+            "drawing": drawing or "active",
+            "result": result
+        }
+    except AttributeError:
+        return {
+            "success": False,
+            "message": "drawing_add_draft_dim not available in this creopyson version. Use 'Show Model Annotations' in Creo to display model dimensions on the drawing.",
+            "workaround": "Creo menu: View > Show Model Annotations > Dimensions"
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def creo_add_table(
+    rows: int,
+    cols: int,
+    drawing: Optional[str] = None,
+    point: Optional[Dict[str, float]] = None,
+    sheet: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Create a table on a drawing (for BOM, legend, etc.).
+
+    Args:
+        rows: Number of rows
+        cols: Number of columns
+        drawing: Drawing name (default: active drawing)
+        point: Position {"x": 10, "y": 10} in drawing units (default: auto-placed)
+        sheet: Sheet number (default: active sheet)
+    """
+    try:
+        client = get_creoson_client()
+        kwargs: Dict[str, Any] = {
+            "nrows": rows,
+            "ncols": cols,
+            "file_": drawing
+        }
+        if point:
+            kwargs["location"] = point
+        if sheet:
+            kwargs["sheet"] = sheet
+        result = client.drawing_create_draft_table(**kwargs)
+        return {
+            "success": True,
+            "message": f"Created {rows}x{cols} table on drawing",
+            "rows": rows,
+            "cols": cols,
+            "drawing": drawing or "active",
+            "result": result
+        }
+    except AttributeError:
+        return {
+            "success": False,
+            "message": "drawing_create_draft_table not available in this creopyson version.",
+            "workaround": "Add tables manually in Creo: Table > Insert Table"
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ============================================================================
+# ANALYSIS & MEASUREMENT TOOLS — F8.4
+# ============================================================================
+
+@mcp.tool()
+def creo_get_mass_properties(model: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Get mass properties of a model: volume, surface area, mass, center of gravity,
+    inertia moments. Requires material density to be set for mass calculation.
+
+    Args:
+        model: Model name (default: active model)
+    """
+    try:
+        client = get_creoson_client()
+        props = client.file_massprops(file_=model)
+        return {
+            "success": True,
+            "model": model or "active",
+            "mass_properties": props
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def creo_measure_distance(
+    ref1: str,
+    ref2: str,
+    model: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Measure the minimum distance between two geometric entities.
+
+    Args:
+        ref1: First reference — surface/edge/point name or selection string
+        ref2: Second reference
+        model: Model name (default: active model)
+    """
+    try:
+        client = get_creoson_client()
+        result = client.geometry_get_distance(
+            file_=model,
+            ref1=ref1,
+            ref2=ref2
+        )
+        return {
+            "success": True,
+            "model": model or "active",
+            "ref1": ref1,
+            "ref2": ref2,
+            "distance": result
+        }
+    except AttributeError:
+        return {
+            "success": False,
+            "message": "geometry_get_distance not available in this creopyson version.",
+            "workaround": "Use Analysis > Measure > Distance in Creo."
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def creo_measure_area(
+    surface_refs: List[str],
+    model: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Calculate the total surface area of one or more faces.
+
+    Args:
+        surface_refs: List of surface/face reference names
+        model: Model name (default: active model)
+    """
+    try:
+        client = get_creoson_client()
+        total_area = 0.0
+        results = []
+        for ref in surface_refs:
+            try:
+                area = client.geometry_get_area(file_=model, surface=ref)
+                total_area += float(area) if area else 0.0
+                results.append({"surface": ref, "area": area})
+            except Exception as e:
+                results.append({"surface": ref, "error": str(e)})
+        return {
+            "success": True,
+            "model": model or "active",
+            "surfaces": results,
+            "total_area": total_area
+        }
+    except AttributeError:
+        return {
+            "success": False,
+            "message": "geometry_get_area not available in this creopyson version.",
+            "workaround": "Use Analysis > Measure > Area in Creo."
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 if __name__ == "__main__":
     logger.info("Running MCP server (Extended version)...")
     mcp.run()
